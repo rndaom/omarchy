@@ -63,7 +63,8 @@ SH
 chmod +x "$stub_bin/git"
 
 run_dev_update() {
-  OMARCHY_PATH="$1" \
+  HOME="${TEST_HOME:-$test_tmp}" \
+    OMARCHY_PATH="$1" \
     TEST_GIT_LOG="$git_log" \
     PATH="$stub_bin:$PATH" \
     "$ROOT/bin/omarchy-update-dev"
@@ -103,6 +104,18 @@ fi
 grep -F "OMARCHY_PATH is not a git checkout: $checkout" "$test_tmp/invalid.err" >/dev/null ||
   fail "invalid dev checkout reports the configured path" "$(cat "$test_tmp/invalid.err")"
 pass "invalid dev checkout fails with a useful error"
+
+mkdir -p "$test_tmp/home/.config/omarchy"
+touch "$test_tmp/home/.config/omarchy/dev-patches"
+printf '#!/bin/bash\necho rebuilt\n' >"$stub_bin/omarchy-dev-rebuild"
+chmod +x "$stub_bin/omarchy-dev-rebuild"
+: >"$git_log"
+output=$(TEST_HOME="$test_tmp/home" run_dev_update "$checkout")
+[[ $output == "rebuilt" ]] || fail "a checkout with a patch list is rebuilt" "$output"
+if grep -q ' pull ' "$git_log"; then
+  fail "a checkout with a patch list is not pulled" "$(cat "$git_log")"
+fi
+pass "a checkout with a patch list is rebuilt instead of pulled"
 
 grep -qE '^ *omarchy-update-dev$' "$ROOT/bin/omarchy-update" ||
   fail "top-level update includes the dev checkout step"

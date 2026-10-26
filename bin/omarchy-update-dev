@@ -11,6 +11,12 @@ if ! git -C "$OMARCHY_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; the
   exit 1
 fi
 
+# A checkout carrying branches of its own on top of upstream can't fast-forward,
+# so it is built again from upstream and the branches it lists.
+if [[ -f $HOME/.config/omarchy/dev-patches ]]; then
+  exec omarchy-dev-rebuild
+fi
+
 upstream=$(git -C "$OMARCHY_PATH" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
 if [[ -z $upstream ]]; then
   echo -e "\e[33m\nSkip Omarchy dev checkout update (current branch has no upstream)\e[0m"

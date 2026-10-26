@@ -1,0 +1,213 @@
+#!/bin/bash
+
+# omarchy:summary=Rebuild the dev checkout from its upstream and your own branches
+# omarchy:group=dev
+# omarchy:args=[--resolve <remote/branch>]
+# omarchy:examples=omarchy dev rebuild | omarchy dev rebuild --resolve fork/my-fix
+
+# A dev checkout that carries branches of your own on top of upstream can't
+# fast-forward, so it is built again instead: upstream first, then each branch
+# listed in ~/.config/omarchy/dev-patches merged on top, in order, one
+# remote/branch per line. The build happens in a separate worktree, so the
+# running tree only moves once the whole build is done.
+#
+# A branch whose merge conflicts is left out rather than stopping the update.
+# git rerere replays a conflict once it has been resolved, so each one only
+# needs resolving once: --resolve stops at that branch's merge, in the same
+# order a rebuild merges in, for you to resolve there.
+#
+# omarchy update runs this before packages and migrations. Anything it can't do
+# leaves the checkout as it was and says why, without stopping the update.
+
+set -euo pipefail
+
+patches_file="$HOME/.config/omarchy/dev-patches"
+checkout="$OMARCHY_PATH"
+rebuild_branch=patched
+last_build=refs/omarchy/last-build
+resolve_dir="$HOME/.cache/omarchy-dev-resolve"
+rerere=(-c rerere.enabled=true -c rerere.autoUpdate=true)
+
+resolve=""
+if (( $# == 2 )) && [[ $1 == "--resolve" ]]; then
+  resolve="$2"
+elif (( $# != 0 )); then
+  echo "Usage: omarchy-dev-rebuild [--resolve <remote/branch>]" >&2
+  exit 1
+fi
+
+warn() {
+  echo -e "\e[33m$1\e[0m"
+}
+
+# Something to act on also reaches you outside the update's terminal.
+alert() {
+  warn "$1"
+  omarchy-notification-send -u critical "Omarchy dev checkout" "$1" || true
+}
+
+if [[ $checkout == "/usr/share/omarchy" ]]; then
+  echo "Error: Omarchy is not linked to a dev checkout." >&2
+  exit 1
+fi
+
+if [[ ! -f $patches_file ]]; then
+  echo "Error: no patch list at $patches_file" >&2
+  exit 1
+fi
+
+branch=$(git -C "$checkout" symbolic-ref -q --short HEAD || true)
+if [[ $branch != "$rebuild_branch" ]]; then
+  alert "Skipped rebuilding $checkout: it is on ${branch:-a detached HEAD}, not $rebuild_branch."
+  exit 0
+fi
+
+upstream=$(git -C "$checkout" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)
+if [[ -z $upstream ]]; then
+  alert "Skipped rebuilding $checkout: $branch has no upstream to build on."
+  exit 0
+fi
+
+mapfile -t patches < <(sed -e 's/#.*//' -e 's/[[:space:]]//g' -e '/^$/d' "$patches_file")
+
+if [[ -n $resolve ]] && ! printf '%s\n' "${patches[@]}" | grep -qxF -- "$resolve"; then
+  echo "Error: $resolve is not listed in $patches_file" >&2
+  exit 1
+fi
+
+echo -e "\e[32m\nRebuild Omarchy dev checkout from $upstream and $patches_file\e[0m"
+
+# Not pruned: a branch deleted after its PR merged is still found, and is then
+# reported as already upstream rather than missing. A remote that can't be
+# reached keeps what was fetched from it last time.
+mapfile -t remotes < <(printf '%s\n' "${upstream%%/*}" "${patches[@]%%/*}" | sort -u)
+for remote in "${remotes[@]}"; do
+  git -C "$checkout" fetch --quiet "$remote" ||
+    warn "Could not fetch $remote; building on what was fetched before."
+done
+
+# The rebuild replaces the branch, so a commit made on it directly would be lost.
+if [[ -z $resolve ]] && git -C "$checkout" rev-parse -q --verify "$last_build" >/dev/null; then
+  stray=$(git -C "$checkout" rev-list --count --no-merges HEAD --not "$last_build" "$upstream")
+  if (( stray > 0 )); then
+    alert "Skipped rebuilding $checkout: $branch has $stray commit(s) of its own since the last build. Move them to a listed branch, then run omarchy-dev-rebuild."
+    exit 0
+  fi
+fi
+
+if [[ -n $resolve ]]; then
+  if [[ -e $resolve_dir ]]; then
+    echo "Error: $resolve_dir already exists. Finish or remove it first: git -C $checkout worktree remove --force $resolve_dir" >&2
+    exit 1
+  fi
+  build="$resolve_dir"
+  mkdir -p "${build%/*}"
+else
+  build=$(mktemp -d)
+fi
+
+keep_build=0
+cleanup() {
+  if (( ! keep_build )); then
+    git -C "$checkout" worktree remove --force "$build" 2>/dev/null || rm -rf "$build"
+  fi
+}
+trap cleanup EXIT
+
+git -C "$checkout" worktree add --quiet --detach "$build" "$upstream"
+
+# Merges one branch into the build: 0 merged, 1 left out, 2 stopped for --resolve.
+merge_patch() {
+  local patch="$1" tree
+
+  if ! git -C "$build" rev-parse --quiet --verify "$patch^{commit}" >/dev/null; then
+    warn "  $patch: not found, left out"
+    return 1
+  fi
+
+  if tree=$(git -C "$build" merge-tree --write-tree HEAD "$patch" 2>/dev/null) &&
+    [[ $tree == "$(git -C "$build" rev-parse 'HEAD^{tree}')" ]]; then
+    echo "  $patch: adds nothing, it is already upstream or in an earlier branch"
+    return 0
+  fi
+
+  if git -C "$build" "${rerere[@]}" merge --quiet --no-edit "$patch" >/dev/null 2>&1; then
+    echo "  $patch: merged"
+    return 0
+  fi
+
+  # A merge that failed before it started, offline or otherwise, has nothing to finish.
+  if ! git -C "$build" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+    warn "  $patch: could not be merged, left out"
+    return 1
+  fi
+
+  local unresolved
+  unresolved=$(git -C "$build" diff --name-only --diff-filter=U)
+  if [[ -z $unresolved ]] &&
+    [[ -z $(git -C "$build" diff --cached --name-only -G '^(<<<<<<<|>>>>>>>)( |$)' HEAD) ]] &&
+    git -C "$build" commit --quiet --no-edit >/dev/null 2>&1; then
+    echo "  $patch: merged, with conflicts resolved as before"
+    return 0
+  fi
+
+  if [[ $patch == "$resolve" ]]; then
+    return 2
+  fi
+
+  warn "  $patch: conflicts in ${unresolved//$'\n'/ }, left out"
+  git -C "$build" merge --abort 2>/dev/null || git -C "$build" reset --quiet --hard HEAD
+  return 1
+}
+
+left_out=()
+for patch in "${patches[@]}"; do
+  status=0
+  merge_patch "$patch" || status=$?
+
+  if (( status == 1 )); then
+    left_out+=("$patch")
+  fi
+
+  if [[ -n $resolve && $patch == "$resolve" ]]; then
+    if (( status == 2 )); then
+      keep_build=1
+      cat <<MSG
+
+$patch conflicts in:
+$(git -C "$build" diff --name-only --diff-filter=U | sed 's/^/  /')
+
+Resolve it in $build, then record it:
+  git -C $build add -A && git -C $build commit --no-edit
+  git -C $checkout worktree remove $build
+  omarchy-dev-rebuild
+MSG
+    else
+      echo "$patch merges without anything to resolve."
+    fi
+    exit 0
+  fi
+done
+
+# Updates only keep rebuilding while the build still carries this tooling.
+if [[ ! -x $build/bin/omarchy-dev-rebuild ]] || ! grep -q omarchy-dev-rebuild "$build/bin/omarchy-update-dev"; then
+  alert "Kept $checkout as it was: the new build lost omarchy-dev-rebuild, so later updates could not rebuild. Check the branch that carries it in $patches_file."
+  exit 0
+fi
+
+built=$(git -C "$build" rev-parse HEAD)
+
+if git -C "$checkout" merge-base --is-ancestor "$upstream" HEAD &&
+  git -C "$checkout" diff --quiet HEAD "$built"; then
+  echo "The dev checkout is already up to date."
+elif reason=$(git -C "$checkout" reset --quiet --keep "$built" 2>&1); then
+  echo "Moved $branch to $(git -C "$checkout" log -1 --format='%h')."
+else
+  alert "Kept $checkout as it was: changes there are in the way of the new build. ${reason%%$'\n'*}"
+  exit 0
+fi
+git -C "$checkout" update-ref "$last_build" HEAD
+
+if (( ${#left_out[@]} > 0 )); then
+  alert "Left out ${#left_out[@]} of your branches: ${left_out[*]}. Run omarchy-dev-rebuild in a terminal to see why, or --resolve one."
+fi
