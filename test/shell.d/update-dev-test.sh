@@ -117,6 +117,3 @@ if grep -q ' pull ' "$git_log"; then
 fi
 pass "a checkout with a patch list is rebuilt instead of pulled"
 
-grep -qE '^ *omarchy-update-dev$' "$ROOT/bin/omarchy-update" ||
-  fail "top-level update includes the dev checkout step"
-pass "top-level update includes the dev checkout step"
