@@ -87,6 +87,17 @@ grep -q "commit(s) of its own" "$HOME/notified" || fail "a stray commit is repor
 git -C "$checkout" reset -q --hard "$before"
 pass "a commit made on the branch itself stops the rebuild instead of being lost"
 
+# A branch merged by hand comes back with the rebuild once it is listed.
+commit_file quattro fix-e e e
+git -C "$checkout" fetch -q origin && git -C "$checkout" merge -q --no-edit origin/fix-e
+printf 'origin/fix-b\norigin/fix-c\norigin/fix-d\norigin/fix-e\n' >"$patches"
+rebuild || fail "rebuild failed" "$(cat "$test_tmp/out")"
+grep -q "origin/fix-e: merged" "$test_tmp/out" && [[ -f $checkout/e ]] ||
+  fail "a listed branch merged by hand does not stop the rebuild" "$(cat "$test_tmp/out")"
+before=$(git -C "$checkout" rev-parse HEAD)
+newer_upstream five
+pass "a branch merged by hand and then listed is rebuilt rather than kept as a stray commit"
+
 # Edits in the way of the new build keep the checkout as it was, without failing the update.
 printf 'edit\n' >"$checkout/a"
 rebuild || fail "edits in the way fail the update" "$(cat "$test_tmp/out")"

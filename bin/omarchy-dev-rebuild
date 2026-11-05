@@ -87,8 +87,15 @@ for remote in "${remotes[@]}"; do
 done
 
 # The rebuild replaces the branch, so a commit made on it directly would be lost.
+# One a listed branch also has comes back with that branch's merge.
 if [[ -z $resolve ]] && git -C "$checkout" rev-parse -q --verify "$last_build" >/dev/null; then
-  stray=$(git -C "$checkout" rev-list --count --no-merges HEAD --not "$last_build" "$upstream")
+  listed=()
+  for patch in "${patches[@]}"; do
+    if git -C "$checkout" rev-parse -q --verify "refs/remotes/$patch" >/dev/null; then
+      listed+=("refs/remotes/$patch")
+    fi
+  done
+  stray=$(git -C "$checkout" rev-list --count --no-merges HEAD --not "$last_build" "$upstream" "${listed[@]}")
   if (( stray > 0 )); then
     alert "Skipped rebuilding $checkout: $branch has $stray commit(s) of its own since the last build. Move them to a listed branch, then run omarchy-dev-rebuild."
     exit 0
