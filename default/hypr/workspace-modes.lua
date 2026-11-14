@@ -345,21 +345,30 @@ local function keep_over(window)
   end
 end
 
--- Brings a maximized window to the front, as a click on it does on Windows: the
--- windows the mode floated over it wait behind it until they are brought
--- forward. One floating on its own account, such as a dialog or a portal's
--- file picker, belongs over the maximized window, which its app may block until
--- it closes, so it stays there and is put back above it for the clicks on it.
+-- A dialog belongs over the maximized window it was opened from, which its app
+-- may block until it closes. Hyprland tells nothing of which window owns which,
+-- so a dialog is a window of the same process, or one of the portal's, which
+-- shows the file pickers and prompts of other apps and nothing else. Floating on
+-- its own account is no sign of one: Steam, a calculator and a password manager
+-- float by rule and are apps of their own.
+local function dialog_of(window, other)
+  local pid = window.pid or 0
+  return (pid > 0 and other.pid == pid) or (other.class or ""):find("^xdg%-desktop%-portal") ~= nil
+end
+
+-- Brings a maximized window to the front, as a click on it does on Windows:
+-- every other app's windows wait behind it until they are brought forward. Its
+-- dialogs stay over it, and are put back above it for the clicks on them.
 local function bring_forward(window)
-  local over, mine = drawn_over(window), claimed()
+  local over = drawn_over(window)
   for index = #over, 1, -1 do
-    if mine[over[index].address] then
+    if not dialog_of(window, over[index]) then
       restack(over[index], "bottom")
     end
   end
 
   for _, other in ipairs(over) do
-    if not mine[other.address] then
+    if dialog_of(window, other) then
       restack(other, "top")
     end
   end

@@ -504,6 +504,8 @@ local function window(address, options)
     fullscreen = options and options.fullscreen or 0,
     allowed_over_fullscreen = true,
     tags = options and options.tags or {},
+    class = options and options.class,
+    pid = options and options.pid,
     workspace = { id = 3 },
   }
   table.insert(stack, created)
@@ -729,15 +731,31 @@ asks_for_focus(maximized)
 o.bring_forward("0xA")
 assert(not browser.allowed_over_fullscreen, "the dock left the browser over the focused maximized window")
 
--- A dialog over the maximized window, such as the file picker its app waits on,
--- floats on its own account and belongs over it: a click on the maximized window
--- leaves it there, and a click on the dialog reaches it.
-local picker = window("0xC")
+-- The portal's file picker the maximized window's app waits on belongs over
+-- it: a click on the maximized window leaves it there, and a click on the
+-- picker reaches it.
+local picker = window("0xC", { class = "xdg-desktop-portal-gtk", pid = 2 })
 click(picker)
 click(maximized)
-assert(picker.allowed_over_fullscreen, "a click on the maximized window hid the dialog over it")
-assert(index_of(picker) > index_of(maximized), "the dialog drawn over the maximized window was left under it")
-assert(click() == picker, "a click on the dialog over the maximized window went through it")
+assert(picker.allowed_over_fullscreen, "a click on the maximized window hid the file picker over it")
+assert(index_of(picker) > index_of(maximized), "the file picker drawn over the maximized window was left under it")
+assert(click() == picker, "a click on the file picker over the maximized window went through it")
+table.remove(stack, index_of(picker))
+
+-- So does a dialog of its own process.
+maximized.pid = 1
+local dialog = window("0xE", { pid = 1 })
+click(dialog)
+click(maximized)
+assert(dialog.allowed_over_fullscreen, "a click on the maximized window hid its own dialog")
+table.remove(stack, index_of(dialog))
+
+-- Another app floating by a rule of its own, as Steam does, is no dialog: it
+-- waits behind the maximized window brought forward like any other.
+local steam = window("0xF", { class = "steam", pid = 3 })
+click(steam)
+click(maximized)
+assert(not steam.allowed_over_fullscreen, "an app floating on its own account stayed over the maximized window")
 LUA
 
 if ! HOME="$home_dir" XDG_STATE_HOME="$home_dir/.local/state" OMARCHY_PATH="$ROOT" \
