@@ -28,6 +28,8 @@ the end and exits non-zero.
   Deliberately excluded from `./test/all`; it runs in a VM, not the
   development session.
 
+Every pull request runs `./test/all` on a real Omarchy install (`.github/workflows/test.yml`): `test/ci-vm` boots the VM image of the current stable release, copies the checkout and omarchy-pkgs in, and runs the suite in the desktop session with `OMARCHY_PATH` at the checkout and its `bin/` first on `PATH`. The image is fetched from Cloudflare on every run, which measured faster than restoring it from the Actions cache. When a run fails, the job log shows the output of every test file that failed or did not finish, and the job uploads every file's log as an artifact.
+
 A new shell test only needs the right name: drop `<area>-test.sh` into
 `test/shell.d/` and `./test/shell` picks it up automatically. Shared fixtures
 live under `test/shell.d/fixtures/`.
@@ -75,7 +77,11 @@ The runner also lists files with skipped checks, including files that ran some c
 
 ## Compositor-dependent tests
 
-Some tests launch Quickshell or query Hyprland, but the suite must stay green on headless machines. `require_compositor "description"` handles this: when no compositor answers it calls `skip` with the reason and exits 0, and otherwise returns so the file proceeds. The skip marker lets the runner distinguish unavailable runtime coverage from checks that passed.
+Some tests launch Quickshell or query Hyprland, but the suite must stay green on headless machines and must not take over the active screen on a workstation.
+
+When `./test/shell` runs in an active Hyprland session, it automatically starts a private nested Hyprland compositor on a headless `1920x1080` output (`HEADLESS-1`) with no visible window on the host desktop and routes compositor-dependent tests into it. You can run a single compositor test the same way with `./test/headless bash test/shell.d/<area>-test.sh`. Set `OMARCHY_TEST_USE_LIVE_COMPOSITOR=1` (as `test/ci-vm` does inside its disposable VM) to target the live compositor directly.
+
+`require_compositor "description"` handles headless environments: when no compositor answers it calls `skip` with the reason and exits 0, and otherwise returns so the file proceeds. The skip marker lets the runner distinguish unavailable runtime coverage from checks that passed.
 
 The probe is more than an environment check, because `WAYLAND_DISPLAY` only
 proves the variable was inherited. Sandboxes pass the environment through
@@ -102,7 +108,7 @@ A handful of tests fail when a fast path gets slow again. Each prefers a count t
 - `test/shell.d/menu-guard-budget-test.sh` runs the shipped menu's guard batch on this machine's real hardware: the batch within 200ms (about 50ms today) and each guard alone within 100ms (the slowest is about 30ms), scaled to the machine, listing the slowest guards when either fails. Skipped without `$XDG_RUNTIME_DIR`, which holds the package snapshot the menu relies on.
 - `test/shell.d/theme-set-budget-test.sh` runs the whole `omarchy-theme-set` in a scratch home where every app is a stub given its real cost (a running Hunk, VS Code's Electron boot, three tmux sessions). It fails when either theme's switch takes over 500ms scaled to the machine (about 80ms today), starts more than a handful of tmux clients, starts VS Code to list its extensions, or waits for Hunk's settle nudge.
 - `test/shell.d/bar-startup-budget-test.sh` starts a scratch shell through `bin/omarchy-launch-shell`, as uwsm does at login, on an empty home, and times it until the compositor maps the default bar at a real size: the fastest of three cold starts within 750ms scaled to the machine (about 280ms today). Greetd and the compositor's own start are left to acceptance testing. Compositor-gated, and it reads the live session, so a busy desktop can fail it.
-- `test/shell.d/lock-appear-budget-test.sh` times the lock preview surface, which renders the real LockView without engaging the session lock: the lock service answering within 750ms of shell start and the first appearance within 300ms, each the fastest of three cold starts, and a reappearance within 150ms, the faster of two, all scaled to the machine (about 130ms first and 45ms again today). Compositor-gated, and it reads the live session, so a busy desktop can fail it.
+- `test/shell.d/lock-appear-budget-test.sh` times the lock preview surface, which renders the real LockView without engaging the session lock: the lock service answering within four times as long as the shell itself takes to answer (2.6 to 3.2 times on GitHub's runners, Intel and AMD alike, where process speed tracks neither), and the first appearance, timed once the shell has gone quiet, within 300ms, each the fastest of three cold starts, and a reappearance within 150ms, the faster of two, both scaled to the machine (about 130ms first and 45ms again today). Compositor-gated, and it reads the live session, so a busy desktop can fail it.
 - `test/shell.d/menu-open-budget-test.sh` times a warm menu summon until the compositor maps its surface at a real size: the fastest of three within 150ms scaled to the machine (about 40ms today). Compositor-gated, and it reads the live session, so a busy desktop can fail it.
 - `test/shell.d/panel-open-budgets-test.sh` times each bar panel (audio, Bluetooth, monitor, network, and power where there is a battery) from its IPC open until the compositor maps it: the first open, which builds the panel's content, within 400ms and the faster of two reopens within 150ms, scaled to the machine (about 30 to 60ms for both today). Compositor-gated, and it reads the live session, so a busy desktop can fail it.
 
